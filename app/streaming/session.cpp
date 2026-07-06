@@ -2449,9 +2449,11 @@ bool Session::initializeMicrophoneCapture()
     // Create microphone capture instance
     m_MicrophoneCapture = new MicrophoneCapture(this);
     
-    // Calculate microphone stream port (base port + 13)
+    // Microphone stream port = Sunshine base port (47989) + MIC_STREAM_PORT offset (12).
+    // The server binds map_port(12) = 47989+12 = 48001; the original 47987+13=48000 was
+    // wrong (that's the audio port) and never matched the server.
     QString serverAddress = m_Computer->activeAddress.address();
-    int micPort = 47987 + 13; // Port 48000 by default
+    int micPort = 47989 + 12; // Port 48001 (matches server MIC_STREAM_PORT)
     
     // Initialize microphone with stream configuration
     if (!m_MicrophoneCapture->initialize(serverAddress, micPort, m_StreamConfig)) {

@@ -4,6 +4,7 @@
 #include <Limelight.h>
 #include <SDL.h>
 #include <QDebug>
+#include <QLoggingCategory>
 #include <QHostAddress>
 #include <QNetworkDatagram>
 

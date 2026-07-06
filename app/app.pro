@@ -10,6 +10,9 @@ unix:!macx {
 
 include(../globaldefs.pri)
 
+# Microphone capture (mic passthrough) — cardoza's capture.pri was never wired in
+include(streaming/audio/capture/capture.pri)
+
 # Precompile QML files to avoid writing qmlcache on portable versions.
 # Since this binds the app against the Qt runtime version, we will only
 # do this for Windows and Mac (when disable-prebuilts is not defined),

@@ -7,7 +7,7 @@
 #include <opus.h>
 
 // Forward declarations
-struct STREAM_CONFIGURATION;
+typedef struct _STREAM_CONFIGURATION STREAM_CONFIGURATION;
 class NvComputer;
 
 /**
