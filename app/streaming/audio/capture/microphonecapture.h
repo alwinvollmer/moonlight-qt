@@ -5,6 +5,8 @@
 #include <QUdpSocket>
 #include <QTimer>
 #include <opus.h>
+#include <thread>
+#include <atomic>
 
 // Forward declarations
 typedef struct _STREAM_CONFIGURATION STREAM_CONFIGURATION;
@@ -140,6 +142,7 @@ private:
     bool initializeOpusEncoder();
     void cleanupResources();
     bool encodeAndSendAudio(void* audioData, int audioSize);
+    void senderLoop();  // dedicated thread: drains capture queue and sends (QTimer never fires during streaming)
 
     // Configuration
     QString m_ServerAddress;
@@ -161,6 +164,9 @@ private:
     // Network streaming
     QUdpSocket* m_UdpSocket;
     QTimer* m_CaptureTimer;
+    int m_SendFd;                    // raw UDP socket for sending (thread-safe, no Qt affinity)
+    std::thread m_SenderThread;      // drives capture->encode->send off the (blocked) Qt event loop
+    std::atomic<bool> m_Running;     // sender thread run flag
 
     // Constants
     static constexpr int OPUS_SAMPLE_RATE = 48000;

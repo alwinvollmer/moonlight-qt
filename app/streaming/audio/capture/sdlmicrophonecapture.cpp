@@ -177,6 +177,11 @@ void SdlMicrophoneCapture::processAudioData(Uint8* stream, int len)
 {
     QMutexLocker locker(&m_BufferMutex);
 
+    static int s_cb = 0;
+    if ((s_cb++ % 50) == 0) {
+        qCInfo(QLoggingCategory("microphone")) << "DIAG SDL callback" << s_cb << "len" << len << "queued" << m_BufferQueue.size();
+    }
+
     // Drop buffers if queue is getting too full
     while (m_BufferQueue.size() >= MAX_QUEUED_BUFFERS) {
         AudioBuffer oldBuffer = m_BufferQueue.dequeue();
