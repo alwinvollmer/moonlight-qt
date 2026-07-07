@@ -22,6 +22,7 @@ MicrophoneCapture::MicrophoneCapture(QObject *parent)
     , m_ServerPort(0)
     , m_Enabled(false)
     , m_IsStreaming(false)
+    , m_Gain(1.0f)
     , m_AudioCapture(nullptr)
     , m_SampleRate(OPUS_SAMPLE_RATE)
     , m_Channels(OPUS_CHANNELS)
@@ -46,6 +47,21 @@ bool MicrophoneCapture::initialize(const QString& serverAddress, int serverPort,
 {
     m_ServerAddress = serverAddress;
     m_ServerPort = serverPort;
+
+    // Input gain: capture from headset mics is often quiet (~-30 dB peaks).
+    // Apply a linear gain to the PCM before Opus encode. Tunable at launch via
+    // MOONLIGHT_MIC_GAIN (e.g. "8.0"); defaults to 6.0 (~+15 dB) which brings a
+    // typical headset up to a usable level without clipping.
+    m_Gain = 6.0f;
+    QByteArray gainEnv = qgetenv("MOONLIGHT_MIC_GAIN");
+    if (!gainEnv.isEmpty()) {
+        bool ok = false;
+        float parsed = QString::fromUtf8(gainEnv).toFloat(&ok);
+        if (ok && parsed > 0.0f) {
+            m_Gain = parsed;
+        }
+    }
+    qCInfo(QLoggingCategory("microphone")) << "Microphone input gain:" << m_Gain;
 
     // Calculate frame size for 20ms at 48kHz
     m_FrameSize = (OPUS_SAMPLE_RATE * OPUS_FRAME_MS) / 1000;
@@ -299,8 +315,19 @@ bool MicrophoneCapture::encodeAndSendAudio(void* audioData, int audioSize)
         return false;
     }
 
+    // Apply input gain in place with saturation (headset capture is quiet).
+    if (m_Gain != 1.0f) {
+        opus_int16* samples = static_cast<opus_int16*>(audioData);
+        for (int i = 0; i < expectedSamples; i++) {
+            int v = static_cast<int>(samples[i] * m_Gain);
+            if (v > 32767) v = 32767;
+            else if (v < -32768) v = -32768;
+            samples[i] = static_cast<opus_int16>(v);
+        }
+    }
+
     // Encode audio with Opus
-    int encodedBytes = opus_encode(m_OpusEncoder, 
+    int encodedBytes = opus_encode(m_OpusEncoder,
                                   static_cast<const opus_int16*>(audioData),
                                   m_FrameSize,
                                   m_EncodedBuffer,

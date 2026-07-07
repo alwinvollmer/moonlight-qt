@@ -149,6 +149,7 @@ private:
     int m_ServerPort;
     bool m_Enabled;
     bool m_IsStreaming;
+    float m_Gain;                    // linear input gain applied to PCM before encode (env MOONLIGHT_MIC_GAIN)
 
     // Audio capture
     IMicrophoneCapture* m_AudioCapture;
