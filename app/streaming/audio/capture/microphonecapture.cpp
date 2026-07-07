@@ -23,9 +23,6 @@ MicrophoneCapture::MicrophoneCapture(QObject *parent)
     , m_Enabled(false)
     , m_IsStreaming(false)
     , m_Gain(1.0f)
-    , m_AgcEnabled(true)
-    , m_AgcEnv(0.0f)
-    , m_AgcGain(1.0f)
     , m_AudioCapture(nullptr)
     , m_SampleRate(OPUS_SAMPLE_RATE)
     , m_Channels(OPUS_CHANNELS)
@@ -51,11 +48,10 @@ bool MicrophoneCapture::initialize(const QString& serverAddress, int serverPort,
     m_ServerAddress = serverAddress;
     m_ServerPort = serverPort;
 
-    // Capture from headset mics is quiet (Arctis ~-30 dB peaks even at max node
-    // volume). By default use automatic gain control (AGC) to drive the level up
-    // to a consistent target, like Discord/local apps do. Setting a numeric
-    // MOONLIGHT_MIC_GAIN forces a FIXED gain instead and disables AGC.
-    m_AgcEnabled = true;
+    // Faithful passthrough: send the mic at its captured (local) level so the
+    // level matches what the mic produces locally, and volume is adjusted on the
+    // host side (e.g. the mic slider on the host). Default gain 1.0 = no change.
+    // MOONLIGHT_MIC_GAIN=<n> optionally applies a fixed multiplier if ever wanted.
     m_Gain = 1.0f;
     QByteArray gainEnv = qgetenv("MOONLIGHT_MIC_GAIN");
     if (!gainEnv.isEmpty()) {
@@ -63,11 +59,9 @@ bool MicrophoneCapture::initialize(const QString& serverAddress, int serverPort,
         float parsed = QString::fromUtf8(gainEnv).toFloat(&ok);
         if (ok && parsed > 0.0f) {
             m_Gain = parsed;
-            m_AgcEnabled = false;
         }
     }
-    qCInfo(QLoggingCategory("microphone")) << "Microphone gain mode:"
-        << (m_AgcEnabled ? "AGC (auto)" : "fixed") << "gain" << m_Gain;
+    qCInfo(QLoggingCategory("microphone")) << "Microphone gain:" << m_Gain;
 
     // Calculate frame size for 20ms at 48kHz
     m_FrameSize = (OPUS_SAMPLE_RATE * OPUS_FRAME_MS) / 1000;
@@ -321,35 +315,12 @@ bool MicrophoneCapture::encodeAndSendAudio(void* audioData, int audioSize)
         return false;
     }
 
-    // Apply gain in place with saturation (headset capture is quiet).
-    opus_int16* samples = static_cast<opus_int16*>(audioData);
-    float gain = m_Gain;
-    if (m_AgcEnabled) {
-        // Measure this frame's peak amplitude.
-        int peak = 1;
+    // Optional fixed gain (default 1.0 = faithful passthrough). Applied in place
+    // with saturation. Host-side slider is the intended volume control.
+    if (m_Gain != 1.0f) {
+        opus_int16* samples = static_cast<opus_int16*>(audioData);
         for (int i = 0; i < expectedSamples; i++) {
-            int a = samples[i] < 0 ? -samples[i] : samples[i];
-            if (a > peak) peak = a;
-        }
-        // Envelope: instant attack, slow release (avoids gain jumping on transients).
-        float p = static_cast<float>(peak);
-        if (p > m_AgcEnv) m_AgcEnv = p;
-        else m_AgcEnv = m_AgcEnv * 0.97f + p * 0.03f;
-
-        const float target = 0.6f * 32768.0f;   // aim for ~-4.4 dBFS peaks
-        const float noiseFloor = 150.0f;         // below this treat as silence, don't boost
-        const float maxGain = 30.0f;             // ceiling (~+29 dB) for very quiet mics
-        float desired = (m_AgcEnv > noiseFloor) ? (target / m_AgcEnv) : 1.0f;
-        if (desired < 1.0f) desired = 1.0f;
-        if (desired > maxGain) desired = maxGain;
-        // Smooth the applied gain: rise slowly, fall a bit faster (limit pumping).
-        if (desired > m_AgcGain) m_AgcGain += (desired - m_AgcGain) * 0.05f;
-        else m_AgcGain += (desired - m_AgcGain) * 0.30f;
-        gain = m_AgcGain;
-    }
-    if (gain != 1.0f) {
-        for (int i = 0; i < expectedSamples; i++) {
-            int v = static_cast<int>(samples[i] * gain);
+            int v = static_cast<int>(samples[i] * m_Gain);
             if (v > 32767) v = 32767;
             else if (v < -32768) v = -32768;
             samples[i] = static_cast<opus_int16>(v);

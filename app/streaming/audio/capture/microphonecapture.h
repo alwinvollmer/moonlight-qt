@@ -149,10 +149,7 @@ private:
     int m_ServerPort;
     bool m_Enabled;
     bool m_IsStreaming;
-    float m_Gain;                    // fixed linear gain when AGC disabled (env MOONLIGHT_MIC_GAIN forces this)
-    bool m_AgcEnabled;               // auto gain control: drive level to a target peak (default on)
-    float m_AgcEnv;                  // smoothed peak envelope (fast attack, slow release)
-    float m_AgcGain;                 // current smoothed AGC gain
+    float m_Gain;                    // optional fixed gain; default 1.0 = faithful passthrough (env MOONLIGHT_MIC_GAIN)
 
     // Audio capture
     IMicrophoneCapture* m_AudioCapture;
