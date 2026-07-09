@@ -48,6 +48,11 @@
 #include <QCoreApplication>
 #include <QThreadPool>
 #include <QProcess>
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QUrl>
+#include <QStandardPaths>
 #include <QSvgRenderer>
 #include <QPainter>
 #include <QImage>
@@ -616,9 +621,196 @@ static bool writeLocalClipboard(const QString& text)
     return proc.waitForFinished(1000);
 }
 
+// --- Clipboard file helpers (<=50MB, in-memory) -----------------------------
+// Blob wire format (matches the host): [u32 count]{[u32 nlen][name][u32 dlen][data]}... (LE).
+static const qint64 CLIPBOARD_FILES_CAP = 50LL * 1024 * 1024;
+
+static void appendU32(QByteArray& b, quint32 v)
+{
+    char bytes[4] = { char(v & 0xFF), char((v >> 8) & 0xFF),
+                      char((v >> 16) & 0xFF), char((v >> 24) & 0xFF) };
+    b.append(bytes, 4);
+}
+
+static bool readU32(const QByteArray& b, int& off, quint32& out)
+{
+    if (off + 4 > b.size()) {
+        return false;
+    }
+    out = quint8(b[off]) | (quint32(quint8(b[off + 1])) << 8) |
+          (quint32(quint8(b[off + 2])) << 16) | (quint32(quint8(b[off + 3])) << 24);
+    off += 4;
+    return true;
+}
+
+// Read the local clipboard's copied files into a blob, or empty if the clipboard
+// holds no files / exceeds the size cap. Wayland only (GNOME/nautilus formats).
+static QByteArray readLocalClipboardFiles()
+{
+    if (!WMUtils::isRunningWayland()) {
+        return QByteArray();
+    }
+
+    // Determine which file-list format is present.
+    QProcess lst;
+    lst.start("wl-paste", QStringList() << "--list-types");
+    if (!lst.waitForStarted(1000)) {
+        return QByteArray();
+    }
+    lst.waitForFinished(1000);
+    QString types = QString::fromUtf8(lst.readAllStandardOutput());
+
+    QString mime;
+    bool gnome = false;
+    if (types.contains("x-special/gnome-copied-files")) {
+        mime = "x-special/gnome-copied-files";
+        gnome = true;
+    }
+    else if (types.contains("text/uri-list")) {
+        mime = "text/uri-list";
+    }
+    else {
+        return QByteArray();  // no files on the clipboard
+    }
+
+    QProcess p;
+    p.start("wl-paste", QStringList() << "-t" << mime << "--no-newline");
+    if (!p.waitForStarted(1000)) {
+        return QByteArray();
+    }
+    p.waitForFinished(2000);
+    QString listing = QString::fromUtf8(p.readAllStandardOutput());
+
+    QByteArray blob;
+    QList<QPair<QString, QByteArray>> files;
+    qint64 total = 0;
+    const QStringList lines = listing.split('\n', Qt::SkipEmptyParts);
+    for (int i = 0; i < lines.size(); i++) {
+        // gnome-copied-files starts with a "copy"/"cut" verb line; skip it.
+        if (gnome && i == 0) {
+            continue;
+        }
+        QString line = lines[i].trimmed();
+        if (!line.startsWith("file://")) {
+            continue;
+        }
+        QString path = QUrl(line).toLocalFile();
+        QFileInfo fi(path);
+        if (!fi.isFile()) {
+            continue;  // skip directories/specials in this MVP
+        }
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        QByteArray data = f.readAll();
+        total += data.size();
+        if (total > CLIPBOARD_FILES_CAP) {
+            qInfo() << "Clipboard files exceed" << (CLIPBOARD_FILES_CAP / (1024 * 1024))
+                    << "MB; skipping file sync";
+            return QByteArray();
+        }
+        files.append(qMakePair(fi.fileName(), data));
+    }
+
+    if (files.isEmpty()) {
+        return QByteArray();
+    }
+    appendU32(blob, quint32(files.size()));
+    for (const auto& f : files) {
+        QByteArray name = f.first.toUtf8();
+        appendU32(blob, quint32(name.size()));
+        blob.append(name);
+        appendU32(blob, quint32(f.second.size()));
+        blob.append(f.second);
+    }
+    return blob;
+}
+
+// Parse a files blob, stage the files under the runtime dir, and put them on the
+// local clipboard as gnome-copied-files (nautilus pastes this). Returns file count.
+static int writeLocalClipboardFiles(const QByteArray& blob)
+{
+    int off = 0;
+    quint32 count = 0;
+    if (!readU32(blob, off, count) || count == 0 || count > 100000) {
+        return 0;
+    }
+
+    QString base = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (base.isEmpty()) {
+        base = QDir::tempPath();
+    }
+    QString stageDir = base + "/moonlight-clipboard";
+    QDir(stageDir).removeRecursively();
+    QDir().mkpath(stageDir);
+
+    QStringList uris;
+    for (quint32 i = 0; i < count; i++) {
+        quint32 nlen = 0;
+        if (!readU32(blob, off, nlen) || off + int(nlen) > blob.size()) {
+            break;
+        }
+        QString name = QFileInfo(QString::fromUtf8(blob.constData() + off, nlen)).fileName();
+        off += nlen;
+
+        quint32 dlen = 0;
+        if (!readU32(blob, off, dlen) || off + int(dlen) > blob.size()) {
+            break;
+        }
+        QByteArray data(blob.constData() + off, dlen);
+        off += dlen;
+
+        if (name.isEmpty()) {
+            continue;
+        }
+        QString fp = stageDir + "/" + name;
+        QFile out(fp);
+        if (!out.open(QIODevice::WriteOnly)) {
+            continue;
+        }
+        out.write(data);
+        out.close();
+        uris << QUrl::fromLocalFile(fp).toString();
+    }
+
+    if (uris.isEmpty()) {
+        return 0;
+    }
+
+    // nautilus paste reads x-special/gnome-copied-files: "copy\n<uri>\n<uri>".
+    QByteArray payload = QByteArray("copy\n") + uris.join('\n').toUtf8();
+    QProcess p;
+    p.start("wl-copy", QStringList() << "-t" << "x-special/gnome-copied-files");
+    if (!p.waitForStarted(1000)) {
+        return 0;
+    }
+    p.write(payload);
+    p.closeWriteChannel();
+    if (!p.waitForFinished(2000)) {
+        return 0;
+    }
+    return uris.size();
+}
+
 void Session::pushClipboardToHost()
 {
     // On focus gained: send the local clipboard to the host so paste works there.
+    // Prefer files if the clipboard holds them; otherwise sync text.
+    QByteArray filesBlob = readLocalClipboardFiles();
+    if (!filesBlob.isEmpty()) {
+        QString key = QString::number(qHash(filesBlob));
+        if (key == m_LastSyncedFilesKey) {
+            return;
+        }
+        NvHTTP http(m_Computer);
+        if (http.setClipboardFiles(filesBlob)) {
+            m_LastSyncedFilesKey = key;
+            qInfo() << "Clipboard: pushed" << filesBlob.size() << "bytes of files to host";
+        }
+        return;
+    }
+
     QString local = readLocalClipboard();
     if (local.isEmpty() || local == m_LastSyncedClipboard) {
         return;
@@ -634,8 +826,26 @@ void Session::pushClipboardToHost()
 void Session::pullClipboardFromHost()
 {
     // On focus lost: fetch the host clipboard so what was copied on the remote is
-    // available locally.
+    // available locally. Prefer files if the host has them; otherwise text.
     NvHTTP http(m_Computer);
+
+    QByteArray filesBlob = http.getClipboardFiles();
+    if (filesBlob.size() >= 4) {
+        int off = 0;
+        quint32 count = 0;
+        if (readU32(filesBlob, off, count) && count > 0) {
+            QString key = QString::number(qHash(filesBlob));
+            if (key != m_LastSyncedFilesKey) {
+                int n = writeLocalClipboardFiles(filesBlob);
+                if (n > 0) {
+                    m_LastSyncedFilesKey = key;
+                    qInfo() << "Clipboard: pulled" << n << "file(s) from host";
+                }
+            }
+            return;
+        }
+    }
+
     QString remote = http.getClipboardText();
     if (remote.isEmpty() || remote == m_LastSyncedClipboard) {
         return;

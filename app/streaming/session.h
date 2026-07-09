@@ -267,6 +267,7 @@ private:
     bool m_AudioDisabled;
     bool m_AudioMuted;
     QString m_LastSyncedClipboard;
+    QString m_LastSyncedFilesKey;
     Uint32 m_FullScreenFlag;
     QWindow* m_QtWindow;
     bool m_ThreadedExec;

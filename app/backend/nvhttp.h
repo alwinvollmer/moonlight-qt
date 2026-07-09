@@ -191,6 +191,16 @@ public:
     bool
     setClipboardText(const QString& text);
 
+    // Clipboard file sync (<=50MB, in-memory). getClipboardFiles() pulls a
+    // serialized blob of the host's copied files ([u32 count]{[u32 nlen][name]
+    // [u32 dlen][data]}...); empty if none/unsupported. setClipboardFiles()
+    // pushes such a blob to the host.
+    QByteArray
+    getClipboardFiles();
+
+    bool
+    setClipboardFiles(const QByteArray& blob);
+
     QUrl m_BaseUrlHttp;
     QUrl m_BaseUrlHttps;
 private:
