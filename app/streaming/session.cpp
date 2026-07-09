@@ -47,6 +47,7 @@
 #include <QtEndian>
 #include <QCoreApplication>
 #include <QThreadPool>
+#include <QProcess>
 #include <QSvgRenderer>
 #include <QPainter>
 #include <QImage>
@@ -561,6 +562,89 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     delete decoder;
 
     return true;
+}
+
+// --- Clipboard sync helpers -------------------------------------------------
+// The streaming SDL loop runs on a worker thread (execThread) while the main Qt
+// GUI thread is blocked in QThread::wait(), so QClipboard (which needs the GUI
+// thread + a live event loop) is unusable here. Instead we read/write the local
+// clipboard through a short-lived helper process (wl-clipboard on Wayland, xclip
+// on X11), which is thread- and event-loop-agnostic.
+static QString readLocalClipboard()
+{
+    QString program;
+    QStringList args;
+    if (WMUtils::isRunningWayland()) {
+        program = "wl-paste";
+        args << "--no-newline";
+    }
+    else {
+        program = "xclip";
+        args << "-selection" << "clipboard" << "-o";
+    }
+
+    QProcess proc;
+    proc.start(program, args);
+    if (!proc.waitForStarted(1000)) {
+        qInfo() << "Clipboard read: failed to start" << program << "(is it installed?)";
+        return QString();
+    }
+    proc.waitForFinished(1000);
+    return QString::fromUtf8(proc.readAllStandardOutput());
+}
+
+static bool writeLocalClipboard(const QString& text)
+{
+    QString program;
+    QStringList args;
+    if (WMUtils::isRunningWayland()) {
+        program = "wl-copy";
+    }
+    else {
+        program = "xclip";
+        args << "-selection" << "clipboard";
+    }
+
+    QProcess proc;
+    proc.start(program, args);
+    if (!proc.waitForStarted(1000)) {
+        qInfo() << "Clipboard write: failed to start" << program << "(is it installed?)";
+        return false;
+    }
+    proc.write(text.toUtf8());
+    proc.closeWriteChannel();
+    return proc.waitForFinished(1000);
+}
+
+void Session::pushClipboardToHost()
+{
+    // On focus gained: send the local clipboard to the host so paste works there.
+    QString local = readLocalClipboard();
+    if (local.isEmpty() || local == m_LastSyncedClipboard) {
+        return;
+    }
+
+    NvHTTP http(m_Computer);
+    if (http.setClipboardText(local)) {
+        m_LastSyncedClipboard = local;
+        qInfo() << "Clipboard: pushed" << local.size() << "chars to host";
+    }
+}
+
+void Session::pullClipboardFromHost()
+{
+    // On focus lost: fetch the host clipboard so what was copied on the remote is
+    // available locally.
+    NvHTTP http(m_Computer);
+    QString remote = http.getClipboardText();
+    if (remote.isEmpty() || remote == m_LastSyncedClipboard) {
+        return;
+    }
+
+    if (writeLocalClipboard(remote)) {
+        m_LastSyncedClipboard = remote;
+        qInfo() << "Clipboard: pulled" << remote.size() << "chars from host";
+    }
 }
 
 Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences)
@@ -2114,11 +2198,15 @@ void Session::execInternal()
                     m_AudioMuted = true;
                 }
                 m_InputHandler->notifyFocusLost();
+                // Leaving the stream: bring the host's clipboard back to local.
+                pullClipboardFromHost();
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
                 if (m_Preferences->muteOnFocusLoss) {
                     m_AudioMuted = false;
                 }
+                // Returning to the stream: push local clipboard to the host.
+                pushClipboardToHost();
                 break;
             case SDL_WINDOWEVENT_LEAVE:
                 m_InputHandler->notifyMouseLeave();

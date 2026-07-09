@@ -148,6 +148,11 @@ signals:
 private:
     void execInternal();
 
+    // Clipboard sync: push local clipboard to the host (on focus gained) and
+    // pull the host clipboard to local (on focus lost). Text only.
+    void pushClipboardToHost();
+    void pullClipboardFromHost();
+
     bool initialize();
 
     bool startConnectionAsync();
@@ -261,6 +266,7 @@ private:
     SDL_SpinLock m_DecoderLock;
     bool m_AudioDisabled;
     bool m_AudioMuted;
+    QString m_LastSyncedClipboard;
     Uint32 m_FullScreenFlag;
     QWindow* m_QtWindow;
     bool m_ThreadedExec;

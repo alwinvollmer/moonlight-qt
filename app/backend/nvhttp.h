@@ -182,6 +182,15 @@ public:
     QVector<NvDisplayMode>
     getDisplayModeList(QString serverInfo);
 
+    // Clipboard sync (text only) via the host's /actions/clipboard REST endpoint.
+    // getClipboardText() pulls the host clipboard; returns "" if unsupported/empty.
+    // setClipboardText() pushes local text to the host; returns true on success.
+    QString
+    getClipboardText();
+
+    bool
+    setClipboardText(const QString& text);
+
     QUrl m_BaseUrlHttp;
     QUrl m_BaseUrlHttps;
 private:
