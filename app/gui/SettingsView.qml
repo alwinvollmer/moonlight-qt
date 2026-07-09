@@ -845,6 +845,23 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Frame pacing reduces micro-stutter by delaying frames that come in too early")
                 }
+
+                CheckBox {
+                    id: clipboardSyncCheck
+                    width: parent.width
+                    hoverEnabled: true
+                    text: qsTr("Sync clipboard with host")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.clipboardSync
+                    onCheckedChanged: {
+                        StreamingPreferences.clipboardSync = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Automatically syncs text and files (up to 50 MB) between this PC and the host clipboard when the stream window gains or loses focus.")
+                }
             }
         }
 
@@ -943,9 +960,11 @@ Flickable {
                 CheckBox {
                     id: enableMicrophoneCheck
                     width: parent.width
+                    // Mic passthrough is only supported for a Linux client -> Windows host.
+                    enabled: Qt.platform.os !== "windows"
                     text: qsTr("Enable microphone streaming")
                     font.pointSize: 12
-                    checked: StreamingPreferences.enableMicrophone
+                    checked: StreamingPreferences.enableMicrophone && Qt.platform.os !== "windows"
                     onCheckedChanged: {
                         StreamingPreferences.enableMicrophone = checked
                     }
@@ -953,23 +972,9 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Streams your microphone audio to the host PC for voice chat, commentary, or other applications.")
-                }
-
-                CheckBox {
-                    id: clipboardSyncCheck
-                    width: parent.width
-                    text: qsTr("Sync clipboard with host")
-                    font.pointSize: 12
-                    checked: StreamingPreferences.clipboardSync
-                    onCheckedChanged: {
-                        StreamingPreferences.clipboardSync = checked
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 5000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Automatically syncs text and files (up to 50 MB) between this PC and the host clipboard when the stream window gains or loses focus.")
+                    ToolTip.text: Qt.platform.os === "windows"
+                                  ? qsTr("Microphone streaming is currently supported only from a Linux client to a Windows host.")
+                                  : qsTr("Streams your microphone audio to the host PC for voice chat, commentary, or other applications.")
                 }
             }
         }
