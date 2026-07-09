@@ -795,6 +795,10 @@ static int writeLocalClipboardFiles(const QByteArray& blob)
 
 void Session::pushClipboardToHost()
 {
+    if (!m_Preferences->clipboardSync) {
+        return;
+    }
+
     // On focus gained: send the local clipboard to the host so paste works there.
     // Prefer files if the clipboard holds them; otherwise sync text.
     QByteArray filesBlob = readLocalClipboardFiles();
@@ -825,6 +829,10 @@ void Session::pushClipboardToHost()
 
 void Session::pullClipboardFromHost()
 {
+    if (!m_Preferences->clipboardSync) {
+        return;
+    }
+
     // On focus lost: fetch the host clipboard so what was copied on the remote is
     // available locally. Prefer files if the host has them; otherwise text.
     NvHTTP http(m_Computer);

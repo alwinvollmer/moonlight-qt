@@ -955,6 +955,22 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Streams your microphone audio to the host PC for voice chat, commentary, or other applications.")
                 }
+
+                CheckBox {
+                    id: clipboardSyncCheck
+                    width: parent.width
+                    text: qsTr("Sync clipboard with host")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.clipboardSync
+                    onCheckedChanged: {
+                        StreamingPreferences.clipboardSync = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Automatically syncs text and files (up to 50 MB) between this PC and the host clipboard when the stream window gains or loses focus.")
+                }
             }
         }
 
