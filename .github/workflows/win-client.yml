@@ -5,7 +5,7 @@ permissions:
   contents: read
 jobs:
   build:
-    runs-on: windows-2025
+    runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,7 +16,7 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: 6.11.1
+          version: 6.9.1
           arch: win64_msvc2022_64
           cache: true
 
@@ -24,9 +24,8 @@ jobs:
         shell: cmd
         env:
           ML_SKIP_MSI: "1"
-          QT_PATH: ${{ github.workspace }}\..\Qt\6.11.1\msvc2022_64\bin
         run: |
-          set "PATH=%QT_ROOT_DIR%\bin;%QT_PATH%;%PATH%"
+          set "PATH=%QT_ROOT_DIR%\bin;%PATH%"
           where qmake
           scripts\build-arch.bat release
 

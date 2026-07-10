@@ -112,7 +112,10 @@ if /I "%VC_ARCH%" NEQ "%PROCESSOR_ARCHITECTURE%" (
 )
 
 rem Find Visual Studio and run vcvarsall.bat
-set VSWHERE="%SOURCE_ROOT%\scripts\vswhere.exe"
+rem Prefer the system-installed vswhere (the bundled one is too old to find
+rem recent Visual Studio installs on modern CI runners). Fall back to bundled.
+set VSWHERE="%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist %VSWHERE% set VSWHERE="%SOURCE_ROOT%\scripts\vswhere.exe"
 for /f "usebackq delims=" %%i in (`%VSWHERE% -latest -property installationPath`) do (
     call "%%i\VC\Auxiliary\Build\vcvarsall.bat" %VC_ARCH%
 )
