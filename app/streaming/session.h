@@ -9,6 +9,7 @@
 #include "input/input.h"
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
+#include "audio/capture/microphonecapture.h"
 #include "video/overlaymanager.h"
 
 class SupportedVideoFormatList : public QList<int>
@@ -158,6 +159,13 @@ private:
 
     bool initializeAudioRenderer();
 
+    bool initializeMicrophoneCapture();
+
+    // Clipboard sync: push local clipboard to the host (on focus gained) and
+    // pull the host clipboard to local (on focus lost). Text + files.
+    void pushClipboardToHost();
+    void pullClipboardFromHost();
+
     bool testAudio(int audioConfiguration);
 
     int getAudioRendererCapabilities(int audioConfiguration);
@@ -255,6 +263,8 @@ private:
     SDL_mutex* m_DecoderLock;
     bool m_AudioDisabled;
     bool m_AudioMuted;
+    QString m_LastSyncedClipboard;
+    QString m_LastSyncedFilesKey;
     Uint32 m_FullScreenFlag;
     QQuickWindow* m_QtWindow;
     bool m_UnexpectedTermination;
@@ -278,6 +288,10 @@ private:
     OPUS_MULTISTREAM_CONFIGURATION m_OriginalAudioConfig;
     int m_AudioSampleCount;
     Uint32 m_DropAudioEndTime;
+
+    // Microphone capture
+    MicrophoneCapture* m_MicrophoneCapture;
+    bool m_MicrophoneEnabled;
 
     Overlay::OverlayManager m_OverlayManager;
 

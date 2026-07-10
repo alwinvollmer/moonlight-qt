@@ -14,6 +14,8 @@
 
 #define FAST_FAIL_TIMEOUT_MS 2000
 #define REQUEST_TIMEOUT_MS 5000
+#define CLIPBOARD_TIMEOUT_MS 2000
+#define CLIPBOARD_FILES_TIMEOUT_MS 15000
 #define LAUNCH_TIMEOUT_MS 120000
 #define RESUME_TIMEOUT_MS 30000
 #define QUIT_TIMEOUT_MS 30000
@@ -401,6 +403,120 @@ NvHTTP::getBoxArt(int appId)
     delete reply;
 
     return image;
+}
+
+QString
+NvHTTP::getClipboardText()
+{
+    // Pull the host clipboard. The server returns the raw text body (or a 4xx if
+    // clipboard is unsupported / no active session). Treat any failure as "no
+    // clipboard available" and return empty so we stay compatible with stock hosts.
+    try {
+        return openConnectionToString(m_BaseUrlHttps,
+                                      "actions/clipboard",
+                                      "type=text",
+                                      CLIPBOARD_TIMEOUT_MS,
+                                      NvLogLevel::NVLL_NONE);
+    } catch (...) {
+        // Any failure (404 on stock hosts, no session, network) -> no clipboard.
+        qInfo() << "getClipboard failed (host may not support clipboard sync)";
+        return QString();
+    }
+}
+
+bool
+NvHTTP::setClipboardText(const QString& text)
+{
+    // Push local text to the host via POST /actions/clipboard?type=text.
+    // Built like openConnection() (client cert) but issues a POST with a body.
+    QUrl url(m_BaseUrlHttps);
+    url.setPath("/actions/clipboard");
+    url.setQuery("uniqueid=0123456789ABCDEF&uuid=" +
+                 QUuid::createUuid().toRfc4122().toHex() + "&type=text");
+
+    QNetworkRequest request(url);
+    request.setSslConfiguration(IdentityManager::get()->getSslConfig());
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "text/plain");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+#endif
+
+    QByteArray body = text.toUtf8();
+    QNetworkReply* reply = m_Nam->post(request, body);
+
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &loop, &QEventLoop::quit);
+    QTimer::singleShot(CLIPBOARD_TIMEOUT_MS, &loop, &QEventLoop::quit);
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
+
+    if (!reply->isFinished()) {
+        reply->abort();
+    }
+    m_Nam->clearAccessCache();
+
+    bool ok = (reply->error() == QNetworkReply::NoError);
+    if (!ok) {
+        qInfo() << "setClipboard failed (host may not support it):" << reply->error();
+    }
+    delete reply;
+    return ok;
+}
+
+QByteArray
+NvHTTP::getClipboardFiles()
+{
+    // Pull the host's copied files as a serialized blob. Raw bytes (binary), so
+    // we read the reply directly rather than via openConnectionToString (UTF-8).
+    try {
+        QNetworkReply* reply = openConnection(m_BaseUrlHttps,
+                                              "actions/clipboard",
+                                              "type=files",
+                                              CLIPBOARD_FILES_TIMEOUT_MS,
+                                              NvLogLevel::NVLL_NONE);
+        QByteArray data = reply->readAll();
+        delete reply;
+        return data;
+    } catch (...) {
+        qInfo() << "getClipboardFiles failed (host may not support clipboard files)";
+        return QByteArray();
+    }
+}
+
+bool
+NvHTTP::setClipboardFiles(const QByteArray& blob)
+{
+    QUrl url(m_BaseUrlHttps);
+    url.setPath("/actions/clipboard");
+    url.setQuery("uniqueid=0123456789ABCDEF&uuid=" +
+                 QUuid::createUuid().toRfc4122().toHex() + "&type=files");
+
+    QNetworkRequest request(url);
+    request.setSslConfiguration(IdentityManager::get()->getSslConfig());
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+#endif
+
+    QNetworkReply* reply = m_Nam->post(request, blob);
+
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &loop, &QEventLoop::quit);
+    QTimer::singleShot(CLIPBOARD_FILES_TIMEOUT_MS, &loop, &QEventLoop::quit);
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
+
+    if (!reply->isFinished()) {
+        reply->abort();
+    }
+    m_Nam->clearAccessCache();
+
+    bool ok = (reply->error() == QNetworkReply::NoError);
+    if (!ok) {
+        qInfo() << "setClipboardFiles failed (host may not support it):" << reply->error();
+    }
+    delete reply;
+    return ok;
 }
 
 QByteArray

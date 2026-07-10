@@ -50,6 +50,8 @@
 #define SER_SWAPFACEBUTTONS "swapfacebuttons"
 #define SER_CAPTURESYSKEYS "capturesyskeys"
 #define SER_KEEPAWAKE "keepawake"
+#define SER_ENABLEMICROPHONE "enablemicrophone"
+#define SER_CLIPBOARDSYNC "clipboardsync"
 #define SER_LANGUAGE "language"
 
 #define CURRENT_DEFAULT_VER 2
@@ -146,6 +148,8 @@ void StreamingPreferences::reload()
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
     muteOnFocusLoss = settings.value(SER_MUTEONFOCUSLOSS, false).toBool();
+    enableMicrophone = settings.value(SER_ENABLEMICROPHONE, false).toBool();
+    clipboardSync = settings.value(SER_CLIPBOARDSYNC, true).toBool();
     backgroundGamepad = settings.value(SER_BACKGROUNDGAMEPAD, false).toBool();
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
@@ -353,6 +357,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_DEFAULTVER, CURRENT_DEFAULT_VER);
     settings.setValue(SER_SWAPMOUSEBUTTONS, swapMouseButtons);
     settings.setValue(SER_MUTEONFOCUSLOSS, muteOnFocusLoss);
+    settings.setValue(SER_ENABLEMICROPHONE, enableMicrophone);
+    settings.setValue(SER_CLIPBOARDSYNC, clipboardSync);
     settings.setValue(SER_BACKGROUNDGAMEPAD, backgroundGamepad);
     settings.setValue(SER_REVERSESCROLL, reverseScrollDirection);
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);

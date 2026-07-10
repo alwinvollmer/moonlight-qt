@@ -34,6 +34,12 @@
 #include <QtEndian>
 #include <QCoreApplication>
 #include <QThreadPool>
+#include <QProcess>
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QUrl>
+#include <QStandardPaths>
 #include <QSvgRenderer>
 #include <QPainter>
 #include <QImage>
@@ -547,6 +553,301 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     return true;
 }
 
+// --- Clipboard sync helpers -------------------------------------------------
+// The streaming SDL loop hijacks its thread and suspends Qt event processing, so
+// QClipboard (which needs the GUI thread + a live event loop) is unusable here.
+// Instead we read/write the local clipboard through a short-lived helper process
+// (wl-clipboard on Wayland, xclip on X11), which is thread/event-loop-agnostic.
+static QString readLocalClipboard()
+{
+    QString program;
+    QStringList args;
+    if (WMUtils::isRunningWayland()) {
+        program = "wl-paste";
+        args << "--no-newline";
+    }
+    else {
+        program = "xclip";
+        args << "-selection" << "clipboard" << "-o";
+    }
+
+    QProcess proc;
+    proc.start(program, args);
+    if (!proc.waitForStarted(1000)) {
+        qInfo() << "Clipboard read: failed to start" << program << "(is it installed?)";
+        return QString();
+    }
+    proc.waitForFinished(1000);
+    return QString::fromUtf8(proc.readAllStandardOutput());
+}
+
+static bool writeLocalClipboard(const QString& text)
+{
+    QString program;
+    QStringList args;
+    if (WMUtils::isRunningWayland()) {
+        program = "wl-copy";
+    }
+    else {
+        program = "xclip";
+        args << "-selection" << "clipboard";
+    }
+
+    QProcess proc;
+    proc.start(program, args);
+    if (!proc.waitForStarted(1000)) {
+        qInfo() << "Clipboard write: failed to start" << program << "(is it installed?)";
+        return false;
+    }
+    proc.write(text.toUtf8());
+    proc.closeWriteChannel();
+    return proc.waitForFinished(1000);
+}
+
+// --- Clipboard file helpers (<=50MB, in-memory) -----------------------------
+// Blob wire format (matches the host): [u32 count]{[u32 nlen][name][u32 dlen][data]}... (LE).
+static const qint64 CLIPBOARD_FILES_CAP = 50LL * 1024 * 1024;
+
+static void appendU32(QByteArray& b, quint32 v)
+{
+    char bytes[4] = { char(v & 0xFF), char((v >> 8) & 0xFF),
+                      char((v >> 16) & 0xFF), char((v >> 24) & 0xFF) };
+    b.append(bytes, 4);
+}
+
+static bool readU32(const QByteArray& b, int& off, quint32& out)
+{
+    if (off + 4 > b.size()) {
+        return false;
+    }
+    out = quint8(b[off]) | (quint32(quint8(b[off + 1])) << 8) |
+          (quint32(quint8(b[off + 2])) << 16) | (quint32(quint8(b[off + 3])) << 24);
+    off += 4;
+    return true;
+}
+
+// Read the local clipboard's copied files into a blob, or empty if the clipboard
+// holds no files / exceeds the size cap. Wayland only (GNOME/nautilus formats).
+static QByteArray readLocalClipboardFiles()
+{
+    if (!WMUtils::isRunningWayland()) {
+        return QByteArray();
+    }
+
+    // Determine which file-list format is present.
+    QProcess lst;
+    lst.start("wl-paste", QStringList() << "--list-types");
+    if (!lst.waitForStarted(1000)) {
+        return QByteArray();
+    }
+    lst.waitForFinished(1000);
+    QString types = QString::fromUtf8(lst.readAllStandardOutput());
+
+    QString mime;
+    bool gnome = false;
+    if (types.contains("x-special/gnome-copied-files")) {
+        mime = "x-special/gnome-copied-files";
+        gnome = true;
+    }
+    else if (types.contains("text/uri-list")) {
+        mime = "text/uri-list";
+    }
+    else {
+        return QByteArray();  // no files on the clipboard
+    }
+
+    QProcess p;
+    p.start("wl-paste", QStringList() << "-t" << mime << "--no-newline");
+    if (!p.waitForStarted(1000)) {
+        return QByteArray();
+    }
+    p.waitForFinished(2000);
+    QString listing = QString::fromUtf8(p.readAllStandardOutput());
+
+    QByteArray blob;
+    QList<QPair<QString, QByteArray>> files;
+    qint64 total = 0;
+    const QStringList lines = listing.split('\n', Qt::SkipEmptyParts);
+    for (int i = 0; i < lines.size(); i++) {
+        // gnome-copied-files starts with a "copy"/"cut" verb line; skip it.
+        if (gnome && i == 0) {
+            continue;
+        }
+        QString line = lines[i].trimmed();
+        if (!line.startsWith("file://")) {
+            continue;
+        }
+        QString path = QUrl(line).toLocalFile();
+        QFileInfo fi(path);
+        if (!fi.isFile()) {
+            continue;  // skip directories/specials in this MVP
+        }
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        QByteArray data = f.readAll();
+        total += data.size();
+        if (total > CLIPBOARD_FILES_CAP) {
+            qInfo() << "Clipboard files exceed" << (CLIPBOARD_FILES_CAP / (1024 * 1024))
+                    << "MB; skipping file sync";
+            return QByteArray();
+        }
+        files.append(qMakePair(fi.fileName(), data));
+    }
+
+    if (files.isEmpty()) {
+        return QByteArray();
+    }
+    appendU32(blob, quint32(files.size()));
+    for (const auto& f : files) {
+        QByteArray name = f.first.toUtf8();
+        appendU32(blob, quint32(name.size()));
+        blob.append(name);
+        appendU32(blob, quint32(f.second.size()));
+        blob.append(f.second);
+    }
+    return blob;
+}
+
+// Parse a files blob, stage the files under the runtime dir, and put them on the
+// local clipboard as gnome-copied-files (nautilus pastes this). Returns file count.
+static int writeLocalClipboardFiles(const QByteArray& blob)
+{
+    int off = 0;
+    quint32 count = 0;
+    if (!readU32(blob, off, count) || count == 0 || count > 100000) {
+        return 0;
+    }
+
+    QString base = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (base.isEmpty()) {
+        base = QDir::tempPath();
+    }
+    QString stageDir = base + "/moonlight-clipboard";
+    QDir(stageDir).removeRecursively();
+    QDir().mkpath(stageDir);
+
+    QStringList uris;
+    for (quint32 i = 0; i < count; i++) {
+        quint32 nlen = 0;
+        if (!readU32(blob, off, nlen) || off + int(nlen) > blob.size()) {
+            break;
+        }
+        QString name = QFileInfo(QString::fromUtf8(blob.constData() + off, nlen)).fileName();
+        off += nlen;
+
+        quint32 dlen = 0;
+        if (!readU32(blob, off, dlen) || off + int(dlen) > blob.size()) {
+            break;
+        }
+        QByteArray data(blob.constData() + off, dlen);
+        off += dlen;
+
+        if (name.isEmpty()) {
+            continue;
+        }
+        QString fp = stageDir + "/" + name;
+        QFile out(fp);
+        if (!out.open(QIODevice::WriteOnly)) {
+            continue;
+        }
+        out.write(data);
+        out.close();
+        uris << QUrl::fromLocalFile(fp).toString();
+    }
+
+    if (uris.isEmpty()) {
+        return 0;
+    }
+
+    // nautilus paste reads x-special/gnome-copied-files: "copy\n<uri>\n<uri>".
+    QByteArray payload = QByteArray("copy\n") + uris.join('\n').toUtf8();
+    QProcess p;
+    p.start("wl-copy", QStringList() << "-t" << "x-special/gnome-copied-files");
+    if (!p.waitForStarted(1000)) {
+        return 0;
+    }
+    p.write(payload);
+    p.closeWriteChannel();
+    if (!p.waitForFinished(2000)) {
+        return 0;
+    }
+    return uris.size();
+}
+
+void Session::pushClipboardToHost()
+{
+    if (!m_Preferences->clipboardSync) {
+        return;
+    }
+
+    // On focus gained: send the local clipboard to the host so paste works there.
+    // Prefer files if the clipboard holds them; otherwise sync text.
+    QByteArray filesBlob = readLocalClipboardFiles();
+    if (!filesBlob.isEmpty()) {
+        QString key = QString::number(qHash(filesBlob));
+        if (key == m_LastSyncedFilesKey) {
+            return;
+        }
+        NvHTTP http(m_Computer);
+        if (http.setClipboardFiles(filesBlob)) {
+            m_LastSyncedFilesKey = key;
+            qInfo() << "Clipboard: pushed" << filesBlob.size() << "bytes of files to host";
+        }
+        return;
+    }
+
+    QString local = readLocalClipboard();
+    if (local.isEmpty() || local == m_LastSyncedClipboard) {
+        return;
+    }
+
+    NvHTTP http(m_Computer);
+    if (http.setClipboardText(local)) {
+        m_LastSyncedClipboard = local;
+        qInfo() << "Clipboard: pushed" << local.size() << "chars to host";
+    }
+}
+
+void Session::pullClipboardFromHost()
+{
+    if (!m_Preferences->clipboardSync) {
+        return;
+    }
+
+    // On focus lost: fetch the host clipboard so what was copied on the remote is
+    // available locally. Prefer files if the host has them; otherwise text.
+    NvHTTP http(m_Computer);
+
+    QByteArray filesBlob = http.getClipboardFiles();
+    if (filesBlob.size() >= 4) {
+        int off = 0;
+        quint32 count = 0;
+        if (readU32(filesBlob, off, count) && count > 0) {
+            QString key = QString::number(qHash(filesBlob));
+            if (key != m_LastSyncedFilesKey) {
+                int n = writeLocalClipboardFiles(filesBlob);
+                if (n > 0) {
+                    m_LastSyncedFilesKey = key;
+                    qInfo() << "Clipboard: pulled" << n << "file(s) from host";
+                }
+            }
+            return;
+        }
+    }
+
+    QString remote = http.getClipboardText();
+    if (remote.isEmpty() || remote == m_LastSyncedClipboard) {
+        return;
+    }
+
+    if (writeLocalClipboard(remote)) {
+        m_LastSyncedClipboard = remote;
+        qInfo() << "Clipboard: pulled" << remote.size() << "chars from host";
+    }
+}
+
 Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences)
     : m_Preferences(preferences ? preferences : StreamingPreferences::get()),
       m_IsFullScreen(m_Preferences->windowMode != StreamingPreferences::WM_WINDOWED || !WMUtils::isRunningDesktopEnvironment()),
@@ -567,7 +868,9 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_OpusDecoder(nullptr),
       m_AudioRenderer(nullptr),
       m_AudioSampleCount(0),
-      m_DropAudioEndTime(0)
+      m_DropAudioEndTime(0),
+      m_MicrophoneCapture(nullptr),
+      m_MicrophoneEnabled(false)
 {
 }
 
@@ -1943,6 +2246,19 @@ void Session::exec()
     // Switch to async logging mode when we enter the SDL loop
     StreamUtils::enterAsyncLoggingMode();
 
+    // Initialize and start microphone capture (if enabled). The connection is up
+    // and the stream window exists at this point.
+    if (!initializeMicrophoneCapture()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Microphone initialization failed, continuing without microphone");
+    }
+    if (m_MicrophoneCapture && m_MicrophoneEnabled) {
+        if (m_MicrophoneCapture->start()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Microphone streaming started");
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Failed to start microphone streaming");
+        }
+    }
+
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
     SDL_Event event;
@@ -2032,12 +2348,16 @@ void Session::exec()
                     m_AudioMuted = true;
                 }
                 m_InputHandler->notifyFocusLost();
+                // Leaving the stream: bring the host's clipboard back to local.
+                pullClipboardFromHost();
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
                 if (m_Preferences->muteOnFocusLoss) {
                     m_AudioMuted = false;
                 }
                 m_InputHandler->notifyFocusGained();
+                // Returning to the stream: push local clipboard to the host.
+                pushClipboardToHost();
                 break;
             case SDL_WINDOWEVENT_LEAVE:
                 m_InputHandler->notifyMouseLeave();
@@ -2311,6 +2631,13 @@ DispatchDeferredCleanup:
     delete m_InputHandler;
     m_InputHandler = nullptr;
 
+    // Stop and clean up microphone capture
+    if (m_MicrophoneCapture) {
+        m_MicrophoneCapture->stop();
+        delete m_MicrophoneCapture;
+        m_MicrophoneCapture = nullptr;
+    }
+
     // Destroy the decoder, since this must be done on the main thread
     // NB: This must happen before LiStopConnection() for pull-based
     // decoders.
@@ -2358,4 +2685,33 @@ DispatchDeferredCleanup:
     // When it is complete, it will release our s_ActiveSessionSemaphore
     // reference.
     QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
+}
+
+bool Session::initializeMicrophoneCapture()
+{
+    // Only enabled when the user opted in (and not on Windows clients, where the
+    // toggle is disabled -> enableMicrophone stays false).
+    if (!m_Preferences->enableMicrophone) {
+        return true; // Not an error, just disabled
+    }
+
+    m_MicrophoneCapture = new MicrophoneCapture(this);
+
+    // Microphone stream port = Sunshine base port (47989) + MIC_STREAM_PORT offset (12)
+    // = 48001, matching the server's mic receiver.
+    QString serverAddress = m_Computer->activeAddress.address();
+    int micPort = 47989 + 12;
+
+    if (!m_MicrophoneCapture->initialize(serverAddress, micPort, m_StreamConfig)) {
+        delete m_MicrophoneCapture;
+        m_MicrophoneCapture = nullptr;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Failed to initialize microphone capture");
+        return false;
+    }
+
+    m_MicrophoneCapture->setEnabled(m_Preferences->enableMicrophone);
+    m_MicrophoneEnabled = m_Preferences->enableMicrophone;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Microphone capture initialized successfully");
+    return true;
 }

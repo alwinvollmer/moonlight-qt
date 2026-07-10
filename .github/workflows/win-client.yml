@@ -1,0 +1,42 @@
+name: win-client
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Download dependencies
+        run: powershell ./setup-deps.ps1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          cache: true
+          set-env: false
+          add-tools-to-path: false
+          version: 6.11.1
+          arch: win64_msvc2022_64
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git'
+
+      - name: Build x64
+        shell: cmd
+        run: |
+          set "PATH=%QT_PATH%;%PATH%"
+          scripts\build-arch.bat Release x64
+        env:
+          QT_PATH: ${{ runner.workspace }}\Qt\6.11.1\msvc2022_64\bin
+
+      - name: Upload portable
+        uses: actions/upload-artifact@v4
+        with:
+          name: moonlight-extended-windows-x64
+          path: build/installer-x64-release/MoonlightPortable-x64-*.zip
+          if-no-files-found: error
