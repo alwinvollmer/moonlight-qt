@@ -432,6 +432,10 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationDomain("moonlight-stream.com");
     QCoreApplication::setApplicationName("Moonlight");
 
+    // Visible product name for this fork. Organization/application name above are
+    // kept as-is so the config dir, cache, and paired-host settings are preserved.
+    QGuiApplication::setApplicationDisplayName("Moonlight Extended");
+
     if (QFile(QDir::currentPath() + "/portable.dat").exists()) {
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, QDir::currentPath());
@@ -930,9 +934,9 @@ int main(int argc, char *argv[])
 #endif
 
     // This is necessary to show our icon correctly on Wayland
-    app.setDesktopFileName("com.moonlight_stream.Moonlight");
-    qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.moonlight_stream.Moonlight");
-    qputenv("SDL_VIDEO_X11_WMCLASS", "com.moonlight_stream.Moonlight");
+    app.setDesktopFileName("com.moonlight_stream.MoonlightExtended");
+    qputenv("SDL_VIDEO_WAYLAND_WMCLASS", "com.moonlight_stream.MoonlightExtended");
+    qputenv("SDL_VIDEO_X11_WMCLASS", "com.moonlight_stream.MoonlightExtended");
 
     // Register our C++ types for QML
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");
