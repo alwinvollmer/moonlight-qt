@@ -20,6 +20,11 @@ jobs:
           arch: win64_msvc2019_64
           cache: true
 
+      - name: Set up MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
       - name: Build x64 portable
         shell: cmd
         env:
