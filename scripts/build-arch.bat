@@ -236,9 +236,13 @@ if "%ML_SYMBOL_STORE%" NEQ "" (
     if !ERRORLEVEL! NEQ 0 goto Error
 )
 
-echo Building MSI
-msbuild -Restore %SOURCE_ROOT%\wix\Moonlight\Moonlight.wixproj /p:Configuration=%BUILD_CONFIG% /p:Platform=%ARCH% /p:MSBuildProjectExtensionsPath=%BUILD_FOLDER%\
-if !ERRORLEVEL! NEQ 0 goto Error
+if "%ML_SKIP_MSI%"=="1" (
+    echo Skipping MSI build ^(ML_SKIP_MSI=1^) - portable package only
+) else (
+    echo Building MSI
+    msbuild -Restore %SOURCE_ROOT%\wix\Moonlight\Moonlight.wixproj /p:Configuration=%BUILD_CONFIG% /p:Platform=%ARCH% /p:MSBuildProjectExtensionsPath=%BUILD_FOLDER%\
+    if !ERRORLEVEL! NEQ 0 goto Error
+)
 
 echo Copying application binary to deployment directory
 copy %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe %DEPLOY_FOLDER%

@@ -1,0 +1,37 @@
+name: win-client
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.7.3
+          arch: win64_msvc2019_64
+          cache: true
+
+      - name: Build x64 portable
+        shell: cmd
+        env:
+          ML_SKIP_MSI: "1"
+        run: |
+          set "PATH=%QT_ROOT_DIR%\bin;%PATH%"
+          where qmake
+          scripts\build-arch.bat release
+
+      - name: Upload portable
+        uses: actions/upload-artifact@v4
+        with:
+          name: moonlight-extended-windows-x64
+          path: build/installer-x64-release/MoonlightPortable-x64-*.zip
+          if-no-files-found: error
