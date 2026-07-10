@@ -24,7 +24,7 @@ jobs:
           add-tools-to-path: false
           version: 6.11.1
           arch: win64_msvc2022_64
-          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git'
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@073e34d7c2ab4ae6961ed7cca690b3abd5ba5a7e'
 
       - name: Build x64
         shell: cmd

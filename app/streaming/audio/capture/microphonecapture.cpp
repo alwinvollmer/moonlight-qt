@@ -12,10 +12,15 @@
 
 #include <chrono>
 #include <cstring>
+#ifdef Q_OS_WIN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#endif
 
 MicrophoneCapture::MicrophoneCapture(QObject *parent)
     : QObject(parent)
@@ -76,8 +81,12 @@ bool MicrophoneCapture::initialize(const QString& serverAddress, int serverPort,
     // Raw UDP socket for the actual sending. We send from a dedicated std::thread
     // (the QTimer never fires during streaming), and QUdpSocket is not safe to use
     // across threads, so use a plain fd + sendto instead.
-    m_SendFd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    m_SendFd = static_cast<qintptr>(::socket(AF_INET, SOCK_DGRAM, 0));
+#ifdef Q_OS_WIN
+    if (m_SendFd == static_cast<qintptr>(INVALID_SOCKET)) {
+#else
     if (m_SendFd < 0) {
+#endif
         qCWarning(QLoggingCategory("microphone")) << "Failed to create raw UDP send socket";
         return false;
     }
@@ -288,7 +297,11 @@ void MicrophoneCapture::cleanupResources()
     }
 
     if (m_SendFd >= 0) {
+#ifdef Q_OS_WIN
+        ::closesocket(m_SendFd);
+#else
         ::close(m_SendFd);
+#endif
         m_SendFd = -1;
     }
 
@@ -350,8 +363,9 @@ bool MicrophoneCapture::encodeAndSendAudio(void* audioData, int audioSize)
         return false;
     }
 
-    ssize_t sent = ::sendto(m_SendFd, m_EncodedBuffer, encodedBytes, 0,
-                            reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+    int sent = static_cast<int>(::sendto(m_SendFd,
+                            reinterpret_cast<const char*>(m_EncodedBuffer), encodedBytes, 0,
+                            reinterpret_cast<struct sockaddr*>(&dest), static_cast<int>(sizeof(dest))));
     if (sent != encodedBytes) {
         qCWarning(QLoggingCategory("microphone")) << "Failed to send audio packet:" << sent << "/" << encodedBytes;
         return false;

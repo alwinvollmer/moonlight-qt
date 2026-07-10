@@ -165,7 +165,7 @@ private:
     // Network streaming
     QUdpSocket* m_UdpSocket;
     QTimer* m_CaptureTimer;
-    int m_SendFd;                    // raw UDP socket for sending (thread-safe, no Qt affinity)
+    qintptr m_SendFd;                // raw UDP socket for sending (thread-safe, no Qt affinity; holds SOCKET on Win, int on Unix)
     std::thread m_SenderThread;      // drives capture->encode->send off the (blocked) Qt event loop
     std::atomic<bool> m_Running;     // sender thread run flag
 
