@@ -40,6 +40,14 @@
 #include <QDir>
 #include <QUrl>
 #include <QStandardPaths>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#endif
 #include <QSvgRenderer>
 #include <QPainter>
 #include <QImage>
@@ -560,6 +568,21 @@ bool Session::populateDecoderProperties(SDL_Window* window)
 // (wl-clipboard on Wayland, xclip on X11), which is thread/event-loop-agnostic.
 static QString readLocalClipboard()
 {
+#ifdef Q_OS_WIN
+    QString result;
+    if (OpenClipboard(nullptr)) {
+        HANDLE h = GetClipboardData(CF_UNICODETEXT);
+        if (h) {
+            auto* psz = static_cast<wchar_t*>(GlobalLock(h));
+            if (psz) {
+                result = QString::fromWCharArray(psz);
+                GlobalUnlock(h);
+            }
+        }
+        CloseClipboard();
+    }
+    return result;
+#else
     QString program;
     QStringList args;
     if (WMUtils::isRunningWayland()) {
@@ -579,10 +602,32 @@ static QString readLocalClipboard()
     }
     proc.waitForFinished(1000);
     return QString::fromUtf8(proc.readAllStandardOutput());
+#endif
 }
 
 static bool writeLocalClipboard(const QString& text)
 {
+#ifdef Q_OS_WIN
+    if (!OpenClipboard(nullptr)) {
+        return false;
+    }
+    EmptyClipboard();
+    std::wstring w = text.toStdWString();
+    size_t bytes = (w.size() + 1) * sizeof(wchar_t);
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!h) {
+        CloseClipboard();
+        return false;
+    }
+    memcpy(GlobalLock(h), w.c_str(), bytes);
+    GlobalUnlock(h);
+    bool ok = SetClipboardData(CF_UNICODETEXT, h) != nullptr;
+    if (!ok) {
+        GlobalFree(h);
+    }
+    CloseClipboard();
+    return ok;
+#else
     QString program;
     QStringList args;
     if (WMUtils::isRunningWayland()) {
@@ -602,6 +647,7 @@ static bool writeLocalClipboard(const QString& text)
     proc.write(text.toUtf8());
     proc.closeWriteChannel();
     return proc.waitForFinished(1000);
+#endif
 }
 
 // --- Clipboard file helpers (<=50MB, in-memory) -----------------------------
@@ -630,6 +676,59 @@ static bool readU32(const QByteArray& b, int& off, quint32& out)
 // holds no files / exceeds the size cap. Wayland only (GNOME/nautilus formats).
 static QByteArray readLocalClipboardFiles()
 {
+#ifdef Q_OS_WIN
+    QByteArray blob;
+    QList<QPair<QString, QByteArray>> files;
+    qint64 total = 0;
+    if (OpenClipboard(nullptr)) {
+        HANDLE h = GetClipboardData(CF_HDROP);
+        if (h) {
+            HDROP hdrop = static_cast<HDROP>(GlobalLock(h));
+            if (hdrop) {
+                UINT count = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
+                for (UINT i = 0; i < count; i++) {
+                    UINT len = DragQueryFileW(hdrop, i, nullptr, 0);
+                    if (len == 0) {
+                        continue;
+                    }
+                    std::wstring wpath(len + 1, L'\0');
+                    DragQueryFileW(hdrop, i, &wpath[0], len + 1);
+                    QFileInfo fi(QString::fromWCharArray(wpath.c_str()));
+                    if (!fi.isFile()) {
+                        continue;
+                    }
+                    QFile f(fi.absoluteFilePath());
+                    if (!f.open(QIODevice::ReadOnly)) {
+                        continue;
+                    }
+                    QByteArray data = f.readAll();
+                    total += data.size();
+                    if (total > CLIPBOARD_FILES_CAP) {
+                        GlobalUnlock(h);
+                        CloseClipboard();
+                        qInfo() << "Clipboard files exceed" << (CLIPBOARD_FILES_CAP / (1024 * 1024)) << "MB; skipping file sync";
+                        return QByteArray();
+                    }
+                    files.append(qMakePair(fi.fileName(), data));
+                }
+                GlobalUnlock(h);
+            }
+        }
+        CloseClipboard();
+    }
+    if (files.isEmpty()) {
+        return QByteArray();
+    }
+    appendU32(blob, quint32(files.size()));
+    for (const auto& f : files) {
+        QByteArray name = f.first.toUtf8();
+        appendU32(blob, quint32(name.size()));
+        blob.append(name);
+        appendU32(blob, quint32(f.second.size()));
+        blob.append(f.second);
+    }
+    return blob;
+#else
     if (!WMUtils::isRunningWayland()) {
         return QByteArray();
     }
@@ -708,12 +807,87 @@ static QByteArray readLocalClipboardFiles()
         blob.append(f.second);
     }
     return blob;
+#endif
 }
 
 // Parse a files blob, stage the files under the runtime dir, and put them on the
 // local clipboard as gnome-copied-files (nautilus pastes this). Returns file count.
 static int writeLocalClipboardFiles(const QByteArray& blob)
 {
+#ifdef Q_OS_WIN
+    int off = 0;
+    quint32 count = 0;
+    if (!readU32(blob, off, count) || count == 0 || count > 100000) {
+        return 0;
+    }
+
+    QString stageDir = QDir::tempPath() + "/moonlight-extended-clipboard";
+    QDir(stageDir).removeRecursively();
+    QDir().mkpath(stageDir);
+
+    std::wstring fileList;
+    int written = 0;
+    for (quint32 i = 0; i < count; i++) {
+        quint32 nlen = 0;
+        if (!readU32(blob, off, nlen) || off + int(nlen) > blob.size()) {
+            break;
+        }
+        QString name = QFileInfo(QString::fromUtf8(blob.constData() + off, nlen)).fileName();
+        off += nlen;
+
+        quint32 dlen = 0;
+        if (!readU32(blob, off, dlen) || off + int(dlen) > blob.size()) {
+            break;
+        }
+        QByteArray data(blob.constData() + off, dlen);
+        off += dlen;
+
+        if (name.isEmpty()) {
+            continue;
+        }
+        QString fp = QDir(stageDir).filePath(name);
+        QFile out(fp);
+        if (!out.open(QIODevice::WriteOnly)) {
+            continue;
+        }
+        out.write(data);
+        out.close();
+        fileList += QDir::toNativeSeparators(fp).toStdWString();
+        fileList.push_back(L'\0');
+        written++;
+    }
+    if (written == 0) {
+        return 0;
+    }
+    fileList.push_back(L'\0');  // double-null terminate the path list
+
+    size_t bytes = sizeof(DROPFILES) + fileList.size() * sizeof(wchar_t);
+    HGLOBAL hGlobal = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!hGlobal) {
+        return 0;
+    }
+    auto* df = static_cast<DROPFILES*>(GlobalLock(hGlobal));
+    df->pFiles = sizeof(DROPFILES);
+    df->pt.x = 0;
+    df->pt.y = 0;
+    df->fNC = FALSE;
+    df->fWide = TRUE;
+    memcpy(reinterpret_cast<char*>(df) + sizeof(DROPFILES), fileList.data(), fileList.size() * sizeof(wchar_t));
+    GlobalUnlock(hGlobal);
+
+    if (!OpenClipboard(nullptr)) {
+        GlobalFree(hGlobal);
+        return 0;
+    }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_HDROP, hGlobal)) {
+        GlobalFree(hGlobal);
+        CloseClipboard();
+        return 0;
+    }
+    CloseClipboard();
+    return written;
+#else
     int off = 0;
     quint32 count = 0;
     if (!readU32(blob, off, count) || count == 0 || count > 100000) {
@@ -774,6 +948,7 @@ static int writeLocalClipboardFiles(const QByteArray& blob)
         return 0;
     }
     return uris.size();
+#endif
 }
 
 void Session::pushClipboardToHost()
