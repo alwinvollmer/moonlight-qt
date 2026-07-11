@@ -184,19 +184,9 @@ void MicrophoneCapture::captureAndStreamAudio()
     void* audioBuffer = nullptr;
     int audioSize = 0;
 
-    static int s_tick = 0, s_got = 0;
-    s_tick++;
-
     // Get audio buffer from capture device
     if (!m_AudioCapture->getAudioBuffer(&audioBuffer, &audioSize)) {
-        if ((s_tick % 100) == 1) {
-            qCInfo(QLoggingCategory("microphone")) << "DIAG tick" << s_tick << "getAudioBuffer=empty";
-        }
         return; // No audio available
-    }
-    s_got++;
-    if ((s_got % 50) == 1) {
-        qCInfo(QLoggingCategory("microphone")) << "DIAG tick" << s_tick << "got buffers" << s_got << "size" << audioSize;
     }
 
     // Encode and send the audio
@@ -208,7 +198,6 @@ void MicrophoneCapture::captureAndStreamAudio()
 
 void MicrophoneCapture::senderLoop()
 {
-    int sentCount = 0;
     while (m_Running.load()) {
         // Drain everything currently queued, then sleep briefly.
         void* audioBuffer = nullptr;
@@ -216,11 +205,7 @@ void MicrophoneCapture::senderLoop()
         bool any = false;
         while (m_Running.load() && m_AudioCapture &&
                m_AudioCapture->getAudioBuffer(&audioBuffer, &audioSize)) {
-            if (encodeAndSendAudio(audioBuffer, audioSize)) {
-                if ((sentCount++ % 50) == 0) {
-                    qCInfo(QLoggingCategory("microphone")) << "DIAG sender: sent" << sentCount << "packets";
-                }
-            }
+            encodeAndSendAudio(audioBuffer, audioSize);
             m_AudioCapture->releaseAudioBuffer();
             any = true;
         }
