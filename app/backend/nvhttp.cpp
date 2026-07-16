@@ -442,6 +442,8 @@ NvHTTP::setClipboardText(const QString& text)
 #endif
 
     QByteArray body = text.toUtf8();
+    // Accept Sunshine's pinned self-signed cert (same as openConnection does).
+    auto sslConn = connect(m_Nam, &QNetworkAccessManager::sslErrors, this, &NvHTTP::handleSslErrors);
     QNetworkReply* reply = m_Nam->post(request, body);
 
     QEventLoop loop;
@@ -459,6 +461,7 @@ NvHTTP::setClipboardText(const QString& text)
     if (!ok) {
         qInfo() << "setClipboard failed (host may not support it):" << reply->error();
     }
+    disconnect(sslConn);
     delete reply;
     return ok;
 }
@@ -498,6 +501,7 @@ NvHTTP::setClipboardFiles(const QByteArray& blob)
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 #endif
 
+    auto sslConn = connect(m_Nam, &QNetworkAccessManager::sslErrors, this, &NvHTTP::handleSslErrors);
     QNetworkReply* reply = m_Nam->post(request, blob);
 
     QEventLoop loop;
@@ -515,6 +519,7 @@ NvHTTP::setClipboardFiles(const QByteArray& blob)
     if (!ok) {
         qInfo() << "setClipboardFiles failed (host may not support it):" << reply->error();
     }
+    disconnect(sslConn);
     delete reply;
     return ok;
 }
