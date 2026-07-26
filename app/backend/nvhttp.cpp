@@ -479,9 +479,13 @@ NvHTTP::getClipboardFiles()
                                               NvLogLevel::NVLL_NONE);
         QByteArray data = reply->readAll();
         delete reply;
+        qInfo() << "Clipboard[http]: getClipboardFiles OK," << data.size() << "bytes from host";
         return data;
+    } catch (const std::exception& e) {
+        qInfo() << "Clipboard[http]: getClipboardFiles failed:" << e.what();
+        return QByteArray();
     } catch (...) {
-        qInfo() << "getClipboardFiles failed (host may not support clipboard files)";
+        qInfo() << "Clipboard[http]: getClipboardFiles failed (unknown error)";
         return QByteArray();
     }
 }
@@ -515,9 +519,15 @@ NvHTTP::setClipboardFiles(const QByteArray& blob)
     }
     m_Nam->clearAccessCache();
 
+    int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     bool ok = (reply->error() == QNetworkReply::NoError);
-    if (!ok) {
-        qInfo() << "setClipboardFiles failed (host may not support it):" << reply->error();
+    if (ok) {
+        qInfo() << "Clipboard[http]: setClipboardFiles OK, HTTP" << httpStatus
+                << "(" << blob.size() << "bytes sent)";
+    }
+    else {
+        qInfo() << "Clipboard[http]: setClipboardFiles FAILED, netErr" << reply->error()
+                << "HTTP" << httpStatus;
     }
     disconnect(sslConn);
     delete reply;

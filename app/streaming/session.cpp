@@ -741,6 +741,7 @@ static QByteArray readLocalClipboardFiles()
     }
     lst.waitForFinished(1000);
     QString types = QString::fromUtf8(lst.readAllStandardOutput());
+    qInfo() << "Clipboard[read-files]: wl-paste --list-types:" << types.split('\n', Qt::SkipEmptyParts);
 
     QString mime;
     bool gnome = false;
@@ -752,8 +753,10 @@ static QByteArray readLocalClipboardFiles()
         mime = "text/uri-list";
     }
     else {
+        qInfo() << "Clipboard[read-files]: no file mime on clipboard (no gnome-copied-files / uri-list)";
         return QByteArray();  // no files on the clipboard
     }
+    qInfo() << "Clipboard[read-files]: using mime" << mime;
 
     QProcess p;
     p.start("wl-paste", QStringList() << "-t" << mime << "--no-newline");
@@ -792,10 +795,13 @@ static QByteArray readLocalClipboardFiles()
                     << "MB; skipping file sync";
             return QByteArray();
         }
+        qInfo() << "Clipboard[read-files]: +" << fi.fileName() << data.size() << "bytes";
         files.append(qMakePair(fi.fileName(), data));
     }
 
     if (files.isEmpty()) {
+        qInfo() << "Clipboard[read-files]: parsed 0 usable files (all dirs/unreadable?);"
+                << lines.size() << "listing line(s)";
         return QByteArray();
     }
     appendU32(blob, quint32(files.size()));
@@ -806,6 +812,7 @@ static QByteArray readLocalClipboardFiles()
         appendU32(blob, quint32(f.second.size()));
         blob.append(f.second);
     }
+    qInfo() << "Clipboard[read-files]: built blob" << blob.size() << "bytes from" << files.size() << "file(s)";
     return blob;
 #endif
 }
@@ -932,21 +939,26 @@ static int writeLocalClipboardFiles(const QByteArray& blob)
     }
 
     if (uris.isEmpty()) {
+        qInfo() << "Clipboard[write-files]: staged 0 files (blob parse failed)";
         return 0;
     }
+    qInfo() << "Clipboard[write-files]: staged" << uris.size() << "file(s) under" << stageDir;
 
     // nautilus paste reads x-special/gnome-copied-files: "copy\n<uri>\n<uri>".
     QByteArray payload = QByteArray("copy\n") + uris.join('\n').toUtf8();
     QProcess p;
     p.start("wl-copy", QStringList() << "-t" << "x-special/gnome-copied-files");
     if (!p.waitForStarted(1000)) {
+        qInfo() << "Clipboard[write-files]: wl-copy failed to start";
         return 0;
     }
     p.write(payload);
     p.closeWriteChannel();
     if (!p.waitForFinished(2000)) {
+        qInfo() << "Clipboard[write-files]: wl-copy did not finish in 2s";
         return 0;
     }
+    qInfo() << "Clipboard[write-files]: wl-copy set" << uris.size() << "file(s) OK";
     return uris.size();
 #endif
 }
@@ -954,72 +966,110 @@ static int writeLocalClipboardFiles(const QByteArray& blob)
 void Session::pushClipboardToHost()
 {
     if (!m_Preferences->clipboardSync) {
+        qInfo() << "Clipboard[push]: skipped (clipboardSync disabled in settings)";
         return;
     }
+
+    qInfo() << "Clipboard[push]: focus-gained trigger; checking local clipboard for files";
 
     // On focus gained: send the local clipboard to the host so paste works there.
     // Prefer files if the clipboard holds them; otherwise sync text.
     QByteArray filesBlob = readLocalClipboardFiles();
     if (!filesBlob.isEmpty()) {
+        qInfo() << "Clipboard[push]: local clipboard has files, blob" << filesBlob.size() << "bytes";
         QString key = QString::number(qHash(filesBlob));
         if (key == m_LastSyncedFilesKey) {
+            qInfo() << "Clipboard[push]: files unchanged since last sync (dedup key" << key << "); skipping";
             return;
         }
         NvHTTP http(m_Computer);
         if (http.setClipboardFiles(filesBlob)) {
             m_LastSyncedFilesKey = key;
-            qInfo() << "Clipboard: pushed" << filesBlob.size() << "bytes of files to host";
+            qInfo() << "Clipboard[push]: pushed" << filesBlob.size() << "bytes of files to host OK";
+        }
+        else {
+            qInfo() << "Clipboard[push]: setClipboardFiles FAILED (host rejected or network error)";
         }
         return;
     }
 
+    qInfo() << "Clipboard[push]: no files on local clipboard, falling back to text";
     QString local = readLocalClipboard();
-    if (local.isEmpty() || local == m_LastSyncedClipboard) {
+    if (local.isEmpty()) {
+        qInfo() << "Clipboard[push]: local text clipboard empty; nothing to push";
+        return;
+    }
+    if (local == m_LastSyncedClipboard) {
+        qInfo() << "Clipboard[push]: text unchanged since last sync; skipping";
         return;
     }
 
     NvHTTP http(m_Computer);
     if (http.setClipboardText(local)) {
         m_LastSyncedClipboard = local;
-        qInfo() << "Clipboard: pushed" << local.size() << "chars to host";
+        qInfo() << "Clipboard[push]: pushed" << local.size() << "chars of text to host OK";
+    }
+    else {
+        qInfo() << "Clipboard[push]: setClipboardText FAILED";
     }
 }
 
 void Session::pullClipboardFromHost()
 {
     if (!m_Preferences->clipboardSync) {
+        qInfo() << "Clipboard[pull]: skipped (clipboardSync disabled in settings)";
         return;
     }
+
+    qInfo() << "Clipboard[pull]: focus-lost trigger; fetching host clipboard files";
 
     // On focus lost: fetch the host clipboard so what was copied on the remote is
     // available locally. Prefer files if the host has them; otherwise text.
     NvHTTP http(m_Computer);
 
     QByteArray filesBlob = http.getClipboardFiles();
+    qInfo() << "Clipboard[pull]: host returned" << filesBlob.size() << "bytes for type=files";
     if (filesBlob.size() >= 4) {
         int off = 0;
         quint32 count = 0;
         if (readU32(filesBlob, off, count) && count > 0) {
+            qInfo() << "Clipboard[pull]: host clipboard holds" << count << "file(s)";
             QString key = QString::number(qHash(filesBlob));
             if (key != m_LastSyncedFilesKey) {
                 int n = writeLocalClipboardFiles(filesBlob);
                 if (n > 0) {
                     m_LastSyncedFilesKey = key;
-                    qInfo() << "Clipboard: pulled" << n << "file(s) from host";
+                    qInfo() << "Clipboard[pull]: staged + set" << n << "file(s) on local clipboard OK";
                 }
+                else {
+                    qInfo() << "Clipboard[pull]: writeLocalClipboardFiles wrote 0 files (staging/wl-copy failed)";
+                }
+            }
+            else {
+                qInfo() << "Clipboard[pull]: files unchanged since last sync (dedup key" << key << "); skipping";
             }
             return;
         }
+        qInfo() << "Clipboard[pull]: files blob present but count=0/unparseable; falling back to text";
     }
 
     QString remote = http.getClipboardText();
-    if (remote.isEmpty() || remote == m_LastSyncedClipboard) {
+    qInfo() << "Clipboard[pull]: host returned" << remote.size() << "chars for type=text";
+    if (remote.isEmpty()) {
+        qInfo() << "Clipboard[pull]: host text clipboard empty; nothing to pull";
+        return;
+    }
+    if (remote == m_LastSyncedClipboard) {
+        qInfo() << "Clipboard[pull]: text unchanged since last sync; skipping";
         return;
     }
 
     if (writeLocalClipboard(remote)) {
         m_LastSyncedClipboard = remote;
-        qInfo() << "Clipboard: pulled" << remote.size() << "chars from host";
+        qInfo() << "Clipboard[pull]: set" << remote.size() << "chars of text on local clipboard OK";
+    }
+    else {
+        qInfo() << "Clipboard[pull]: writeLocalClipboard FAILED";
     }
 }
 
@@ -2524,6 +2574,7 @@ void Session::exec()
                 }
                 m_InputHandler->notifyFocusLost();
                 // Leaving the stream: bring the host's clipboard back to local.
+                qInfo() << "Clipboard: SDL FOCUS_LOST -> pullClipboardFromHost()";
                 pullClipboardFromHost();
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
@@ -2532,6 +2583,7 @@ void Session::exec()
                 }
                 m_InputHandler->notifyFocusGained();
                 // Returning to the stream: push local clipboard to the host.
+                qInfo() << "Clipboard: SDL FOCUS_GAINED -> pushClipboardToHost()";
                 pushClipboardToHost();
                 break;
             case SDL_WINDOWEVENT_LEAVE:
