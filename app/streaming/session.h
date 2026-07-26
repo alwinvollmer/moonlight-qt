@@ -2,6 +2,8 @@
 
 #include <QSemaphore>
 #include <QQuickWindow>
+#include <QThread>
+#include <QAtomicInt>
 
 #include <Limelight.h>
 #include <opus_multistream.h>
@@ -163,8 +165,16 @@ private:
 
     // Clipboard sync: push local clipboard to the host (on focus gained) and
     // pull the host clipboard to local (on focus lost). Text + files.
+    // pushClipboardToHost()/pullClipboardFromHost() do blocking work (subprocess
+    // reads of up to 50MB + a network round-trip) and MUST NOT run on the SDL
+    // streaming thread. They run on m_ClipboardThread; the focus handlers only
+    // enqueue via queueClipboardPush()/queueClipboardPull().
     void pushClipboardToHost();
     void pullClipboardFromHost();
+    void queueClipboardPush();
+    void queueClipboardPull();
+    void startClipboardThread();
+    void stopClipboardThread();
 
     bool testAudio(int audioConfiguration);
 
@@ -263,8 +273,17 @@ private:
     SDL_mutex* m_DecoderLock;
     bool m_AudioDisabled;
     bool m_AudioMuted;
-    QString m_LastSyncedClipboard;
-    QString m_LastSyncedFilesKey;
+    // Dedup markers, per direction (accessed only on m_ClipboardThread).
+    QString m_LastPushedText;
+    QString m_LastPulledText;
+    QString m_LastPushedFilesKey;
+    QString m_LastPulledFilesKey;
+
+    // Clipboard sync runs off the SDL thread on this dedicated thread.
+    QThread* m_ClipboardThread;
+    QObject* m_ClipboardContext;   // lives on m_ClipboardThread; invoke target
+    QAtomicInt m_ClipboardPushPending;
+    QAtomicInt m_ClipboardPullPending;
     Uint32 m_FullScreenFlag;
     QQuickWindow* m_QtWindow;
     bool m_UnexpectedTermination;

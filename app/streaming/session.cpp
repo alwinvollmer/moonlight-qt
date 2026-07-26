@@ -963,6 +963,68 @@ static int writeLocalClipboardFiles(const QByteArray& blob)
 #endif
 }
 
+void Session::startClipboardThread()
+{
+    if (!m_Preferences->clipboardSync) {
+        return;
+    }
+    m_ClipboardThread = new QThread();
+    m_ClipboardThread->setObjectName("ClipboardSync");
+    // Context object lives on the worker thread; queued invokes target it so the
+    // captured push/pull bodies execute there (with that thread's event loop,
+    // which NvHTTP's nested QEventLoop and QNetworkAccessManager require).
+    m_ClipboardContext = new QObject();
+    m_ClipboardContext->moveToThread(m_ClipboardThread);
+    m_ClipboardThread->start();
+    qInfo() << "Clipboard: sync worker thread started";
+}
+
+void Session::stopClipboardThread()
+{
+    if (m_ClipboardThread == nullptr) {
+        return;
+    }
+    // quit() + wait() drains the event loop, so any in-flight push/pull finishes
+    // before we tear down. The context object's thread is stopped afterwards, so
+    // deleting it from this (the SDL) thread is safe.
+    m_ClipboardThread->quit();
+    m_ClipboardThread->wait();
+    delete m_ClipboardContext;
+    m_ClipboardContext = nullptr;
+    delete m_ClipboardThread;
+    m_ClipboardThread = nullptr;
+    qInfo() << "Clipboard: sync worker thread stopped";
+}
+
+void Session::queueClipboardPush()
+{
+    if (m_ClipboardContext == nullptr) {
+        return;
+    }
+    // Coalesce focus-flip bursts: if a push is already queued/running, skip.
+    if (!m_ClipboardPushPending.testAndSetOrdered(0, 1)) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_ClipboardContext, [this]() {
+        m_ClipboardPushPending.storeRelease(0);
+        pushClipboardToHost();
+    }, Qt::QueuedConnection);
+}
+
+void Session::queueClipboardPull()
+{
+    if (m_ClipboardContext == nullptr) {
+        return;
+    }
+    if (!m_ClipboardPullPending.testAndSetOrdered(0, 1)) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_ClipboardContext, [this]() {
+        m_ClipboardPullPending.storeRelease(0);
+        pullClipboardFromHost();
+    }, Qt::QueuedConnection);
+}
+
 void Session::pushClipboardToHost()
 {
     if (!m_Preferences->clipboardSync) {
@@ -978,13 +1040,13 @@ void Session::pushClipboardToHost()
     if (!filesBlob.isEmpty()) {
         qInfo() << "Clipboard[push]: local clipboard has files, blob" << filesBlob.size() << "bytes";
         QString key = QString::number(qHash(filesBlob));
-        if (key == m_LastSyncedFilesKey) {
-            qInfo() << "Clipboard[push]: files unchanged since last sync (dedup key" << key << "); skipping";
+        if (key == m_LastPushedFilesKey) {
+            qInfo() << "Clipboard[push]: files unchanged since last push (dedup key" << key << "); skipping";
             return;
         }
         NvHTTP http(m_Computer);
         if (http.setClipboardFiles(filesBlob)) {
-            m_LastSyncedFilesKey = key;
+            m_LastPushedFilesKey = key;
             qInfo() << "Clipboard[push]: pushed" << filesBlob.size() << "bytes of files to host OK";
         }
         else {
@@ -999,14 +1061,14 @@ void Session::pushClipboardToHost()
         qInfo() << "Clipboard[push]: local text clipboard empty; nothing to push";
         return;
     }
-    if (local == m_LastSyncedClipboard) {
-        qInfo() << "Clipboard[push]: text unchanged since last sync; skipping";
+    if (local == m_LastPushedText) {
+        qInfo() << "Clipboard[push]: text unchanged since last push; skipping";
         return;
     }
 
     NvHTTP http(m_Computer);
     if (http.setClipboardText(local)) {
-        m_LastSyncedClipboard = local;
+        m_LastPushedText = local;
         qInfo() << "Clipboard[push]: pushed" << local.size() << "chars of text to host OK";
     }
     else {
@@ -1035,10 +1097,10 @@ void Session::pullClipboardFromHost()
         if (readU32(filesBlob, off, count) && count > 0) {
             qInfo() << "Clipboard[pull]: host clipboard holds" << count << "file(s)";
             QString key = QString::number(qHash(filesBlob));
-            if (key != m_LastSyncedFilesKey) {
+            if (key != m_LastPulledFilesKey) {
                 int n = writeLocalClipboardFiles(filesBlob);
                 if (n > 0) {
-                    m_LastSyncedFilesKey = key;
+                    m_LastPulledFilesKey = key;
                     qInfo() << "Clipboard[pull]: staged + set" << n << "file(s) on local clipboard OK";
                 }
                 else {
@@ -1046,7 +1108,7 @@ void Session::pullClipboardFromHost()
                 }
             }
             else {
-                qInfo() << "Clipboard[pull]: files unchanged since last sync (dedup key" << key << "); skipping";
+                qInfo() << "Clipboard[pull]: files unchanged since last pull (dedup key" << key << "); skipping";
             }
             return;
         }
@@ -1059,13 +1121,13 @@ void Session::pullClipboardFromHost()
         qInfo() << "Clipboard[pull]: host text clipboard empty; nothing to pull";
         return;
     }
-    if (remote == m_LastSyncedClipboard) {
-        qInfo() << "Clipboard[pull]: text unchanged since last sync; skipping";
+    if (remote == m_LastPulledText) {
+        qInfo() << "Clipboard[pull]: text unchanged since last pull; skipping";
         return;
     }
 
     if (writeLocalClipboard(remote)) {
-        m_LastSyncedClipboard = remote;
+        m_LastPulledText = remote;
         qInfo() << "Clipboard[pull]: set" << remote.size() << "chars of text on local clipboard OK";
     }
     else {
@@ -1082,6 +1144,8 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_VideoDecoder(nullptr),
       m_DecoderLock(SDL_CreateMutex()),
       m_AudioMuted(false),
+      m_ClipboardThread(nullptr),
+      m_ClipboardContext(nullptr),
       m_QtWindow(nullptr),
       m_UnexpectedTermination(true), // Failure prior to streaming is unexpected
       m_InputHandler(nullptr),
@@ -2484,6 +2548,10 @@ void Session::exec()
         }
     }
 
+    // Start the clipboard sync worker thread so focus-driven push/pull never
+    // blocks the SDL event loop below.
+    startClipboardThread();
+
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
     SDL_Event event;
@@ -2574,8 +2642,8 @@ void Session::exec()
                 }
                 m_InputHandler->notifyFocusLost();
                 // Leaving the stream: bring the host's clipboard back to local.
-                qInfo() << "Clipboard: SDL FOCUS_LOST -> pullClipboardFromHost()";
-                pullClipboardFromHost();
+                // Enqueue onto the clipboard thread; must not block the SDL thread.
+                queueClipboardPull();
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
                 if (m_Preferences->muteOnFocusLoss) {
@@ -2583,8 +2651,8 @@ void Session::exec()
                 }
                 m_InputHandler->notifyFocusGained();
                 // Returning to the stream: push local clipboard to the host.
-                qInfo() << "Clipboard: SDL FOCUS_GAINED -> pushClipboardToHost()";
-                pushClipboardToHost();
+                // Enqueue onto the clipboard thread; must not block the SDL thread.
+                queueClipboardPush();
                 break;
             case SDL_WINDOWEVENT_LEAVE:
                 m_InputHandler->notifyMouseLeave();
@@ -2864,6 +2932,10 @@ DispatchDeferredCleanup:
         delete m_MicrophoneCapture;
         m_MicrophoneCapture = nullptr;
     }
+
+    // Stop the clipboard worker thread (waits for any in-flight sync to finish).
+    // No more focus events fire after the SDL loop exits, so this is safe here.
+    stopClipboardThread();
 
     // Destroy the decoder, since this must be done on the main thread
     // NB: This must happen before LiStopConnection() for pull-based
