@@ -1171,6 +1171,11 @@ Session::~Session()
     SDL_DestroyMutex(m_DecoderLock);
 }
 
+QString Session::getComputerName() const
+{
+    return m_Computer ? m_Computer->name : QString();
+}
+
 bool Session::initialize(QQuickWindow* qtWindow)
 {
     m_QtWindow = qtWindow;

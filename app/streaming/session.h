@@ -109,6 +109,11 @@ public:
     Q_INVOKABLE void interrupt();
     Q_PROPERTY(QStringList launchWarnings MEMBER m_LaunchWarnings NOTIFY launchWarningsChanged);
 
+    // Host/computer display name, so QML (e.g. the connecting page) can build a
+    // distinct window title like "Connecting to <host> - Moonlight Extended".
+    Q_PROPERTY(QString computerName READ getComputerName CONSTANT);
+    QString getComputerName() const;
+
     static
     void getDecoderInfo(SDL_Window* window,
                         bool& isHardwareAccelerated, bool& isFullScreenOnly,

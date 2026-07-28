@@ -37,6 +37,10 @@ Item {
         if (!launcher.isExecuted()) {
             toolBar.visible = false
 
+            // Distinct title for the connecting phase (StreamSegue refines it
+            // with the host name once the session is created).
+            window.title = qsTr("Connecting - Moonlight Extended")
+
             launcher.searchingComputer.connect(onSearchingComputer)
             launcher.searchingApp.connect(onSearchingApp)
             launcher.sessionCreated.connect(onSessionCreated)

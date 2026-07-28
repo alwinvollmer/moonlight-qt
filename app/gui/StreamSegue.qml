@@ -14,6 +14,9 @@ Item {
     property bool isResume : false
     property bool quitAfter : false
 
+    // Window title to restore when this connecting page leaves the stack.
+    property string savedWindowTitle : ""
+
     function stageStarting(stage)
     {
         // Update the spinner text
@@ -104,6 +107,9 @@ Item {
         // Show the toolbar again when popped off the stack
         toolBar.visible = true
 
+        // Restore the window title we overrode on activation.
+        window.title = savedWindowTitle
+
         // Re-enable GUI gamepad usage now
         SdlGamepadKeyNavigation.enable()
     }
@@ -111,6 +117,13 @@ Item {
     StackView.onActivated: {
         // Hide the toolbar before we start loading
         toolBar.visible = false
+
+        // Give this "connecting" window a distinct title so window managers can
+        // tell it apart from the app grid and the running stream window.
+        savedWindowTitle = window.title
+        window.title = (session && session.computerName.length > 0)
+                       ? qsTr("Connecting to %1 - Moonlight Extended").arg(session.computerName)
+                       : qsTr("Connecting - Moonlight Extended")
 
         // Hook up our signals
         session.stageStarting.connect(stageStarting)
