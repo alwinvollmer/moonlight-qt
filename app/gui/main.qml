@@ -22,6 +22,11 @@ ApplicationWindow {
     width: 1280
     height: 600
 
+    // Set at construction (before the window first maps), so the CLI `stream` launch
+    // already carries a "Connecting…" title on its first frame — lets the WM place the
+    // transient connecting window before it paints. Empty → app display name shows.
+    title: initialWindowTitle.length > 0 ? initialWindowTitle : ""
+
     // This function runs prior to creation of the initial StackView item
     function doEarlyInit() {
         // Override the background color to Material 2 colors for Qt 6.5+

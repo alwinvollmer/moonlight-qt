@@ -37,9 +37,8 @@ Item {
         if (!launcher.isExecuted()) {
             toolBar.visible = false
 
-            // Distinct title for the connecting phase (StreamSegue refines it
-            // with the host name once the session is created).
-            window.title = qsTr("Connecting - Moonlight Extended")
+            // The "Connecting…" window title is set pre-map in main.cpp (with the host
+            // name) for this CLI launch path, so no title override is needed here.
 
             launcher.searchingComputer.connect(onSearchingComputer)
             launcher.searchingApp.connect(onSearchingApp)

@@ -993,6 +993,10 @@ int main(int argc, char *argv[])
 
     QQmlApplicationEngine engine;
     QString initialView;
+    // Window title applied BEFORE the window first maps (so a WM can place the
+    // transient "Connecting…" window before it paints). Empty = use the app display
+    // name. Only set for the CLI `stream` launch path.
+    QString initialWindowTitle;
     bool hasGUI = true;
 
     switch (commandLineParserResult) {
@@ -1009,6 +1013,9 @@ int main(int argc, char *argv[])
             QString appName = streamParser.getAppName();
             auto launcher   = new CliStartStream::Launcher(host, appName, preferences, &app);
             engine.rootContext()->setContextProperty("launcher", launcher);
+            initialWindowTitle = host.isEmpty()
+                ? QStringLiteral("Connecting - Moonlight Extended")
+                : QStringLiteral("Connecting to %1 - Moonlight Extended").arg(host);
             break;
         }
     case GlobalCommandLineParser::QuitRequested:
@@ -1042,6 +1049,7 @@ int main(int argc, char *argv[])
 
     if (hasGUI) {
         engine.rootContext()->setContextProperty("initialView", initialView);
+        engine.rootContext()->setContextProperty("initialWindowTitle", initialWindowTitle);
         engine.rootContext()->setContextProperty("runConfigChecks", commandLineParserResult == GlobalCommandLineParser::NormalStartRequested);
 
         // Load the main.qml file
